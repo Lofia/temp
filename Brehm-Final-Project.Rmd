@@ -1,0 +1,1334 @@
+---
+title: "Predicting Pressure Injuries in Veterans Using Intramuscular Adipose Tissue and Other Factors"
+author: "Gabriel Brehm"
+date: "2023-05-11"
+header-includes:
+  - \usepackage{caption}
+output: 
+  pdf_document:
+    toc: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tufte)
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(rdist)
+library(forcats)
+library(car)
+library(ggthemes)
+library(FactoMineR)
+library(factoextra)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(caret)
+library(ggparty)
+library(ggforce)
+library(gridExtra)
+library(leaps)
+library(GGally)
+```
+
+
+
+```{r data_read_in, include=FALSE}
+all_at_once <- read_excel("BEIPIR Master Key_Jan 2023v3b.xlsx", 
+    sheet = "Everything all together")
+
+```
+
+```{r data_wrangle, include=FALSE}
+# Ensure variables are correct types
+all_at_once <- all_at_once %>% mutate(across(SUBJ:YRIN, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(RACE:PRI, factor))
+all_at_once <- all_at_once %>% mutate(across(IMAT, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(WCTP:SMOK, factor))
+all_at_once <- all_at_once %>% mutate(across(SYRS:HGA1, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(LIVS:PRFQ, factor))
+all_at_once <- all_at_once %>% mutate(across(HRSC, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(EMPL:EDUC, factor))
+
+# Fix Entry Errors
+levels(all_at_once$ETHN) <- c("Hs/L", "Hs/L", "Not Hs/L", "unk")
+levels(all_at_once$WCTP) <- c("AmnWC", "MWc", "MWc", "OWc", "PWc", "TRWc")
+levels(all_at_once$CUTP) <- c("ACu", "ACu", "FCu", "FCu", "LCu", "NoCu", "OCu")
+
+# Albumin values of 999 are equivalent to NA
+all_at_once <- all_at_once %>% 
+  mutate(ALBM = replace(ALBM, ALBM == 999, NA))
+
+# Pick only visit 1
+visit_one <- all_at_once[, -46:-56] %>% 
+  dplyr::filter(VINO == 1) %>%
+  dplyr::select(-SUBJ, -VINO) 
+
+
+
+# Bin the continuous variables based on the following criteria:
+# AGEN: 
+# 0 - 40: young
+# 41 - 55: middle age
+# 56-65: old mid
+# 66+: old
+# 
+# YRIN:
+# 0-8: low
+# 9-23: mid
+# 24+: high
+# 
+# IMAT:
+# 0-15
+# 16-21
+# 21-50
+# 50+
+# 
+# SYRS:
+# 5
+# 6-10
+# 11-20
+# 21+
+# 
+# HT, WT - ignore
+# 
+# BMI: 
+# 22
+# 25
+# 30
+# 40?
+# 
+# ALBM
+# 0-3: low
+# 3-5.5: NORMAL
+# 5.5+ high
+# 
+# HGA1:
+# 0-5.7: normal
+# 5.7+: pre-diabetic
+# 6.0+: diabetic
+# 
+# HRSC:
+# 0-4:
+# 5-12:
+# 13+:
+
+vone_binned <- visit_one %>% mutate(AGEN = cut(AGEN, breaks = c(-Inf, 40, 55, 65, Inf), labels = c("yng", "mid", "old", "sen")),
+                                    YRIN = cut(YRIN, breaks = c(-Inf, 8, 23, Inf), labels = c("sht", "med", "lng")),
+                                    IMAT = cut(IMAT, breaks = c(-Inf, 15, 21, 50, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    SYRS = cut(SYRS, breaks = c(-Inf, 5, 10, 20, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    BMI = cut(BMI, breaks = c(-Inf, 22, 25, 30, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    ALBM = cut(ALBM, breaks = c(-Inf, 3, 5.5, Inf), labels = c("low", "nrm", "hi")),
+                                    HGA1 = cut(HGA1, breaks = c(-Inf, 5.7, 6.0, Inf), labels = c("nrm", "pred", "diab")),
+                                    HRSC = cut(HRSC, breaks = c(-Inf, 4, 12, Inf), labels = c("low", "med", "hi"))) %>%
+  select(-WT, -HT)
+
+categoricals <- visit_one %>% dplyr::select(where(is.factor) | IMAT)
+continuous <- visit_one %>% dplyr::select(where(is.numeric))
+
+```
+
+```{r themes, include=FALSE}
+g.theme <- theme_stata()
+```
+
+## Summary
+
+|   Many veterans suffer from spinal cord injuries (SCI) leading to some level of paralysis. Some of these veterans are victims of recurrent pressure injuries (PrI), some get them rarely or not at all. Previous research has indicated a relationship between intra-muscular adipose tissue (IMAT) and the incidence of recurrent PrI. Additionally, IMAT builds quickly for some with SCI, and slowly or not at all for others. A current goal of the BEIPIR project is to identify factors which contribute to both recurrent PrI and IMAT buildup in veterans with SCI. 
+
+|   The current data set was examined for these factors as a preliminary analysis before receiving genetic data. The genetic data is expected to elucidate some of the variability in the incidence of both PrI and IMAT buildup. However, it is beneficial to understand the other factors in the data that impact these outcomes to understand the impact and change to the models due to the genetic data.To build this understanding, five major analyses were conducted:
+
+* A logit regression to find contributing factors to IMAT
+* A logistic regression to find contributing factors for recurrent PrI
+* A tree-based model to find contributing factors to IMAT
+* A tree-based model to find contributing factors to PrI
+* A correspondence analysis to understand key relationships in the variables
+
+|   These analyses showed that there is likely a great deal of noise in the data, but some signal as well. It's expected that the incoming genetic data will act as a "missing puzzle piece" to explain some of the variance, especially regarding prediction of IMAT from the data.
+
+## Introduction
+
+> “Pressure injures are a major secondary complication for many people with spinal cord injury. Development and/or recurrence of a [pressure injuries] limits activities of daily living, often leading to hospitalization and even death. This has a devastating impact on affected individuals and their caregivers.”
+
+`r tufte::quote_footer('–BEIPIR Specific Aims A01')`
+
+|   Many veterans suffer from spinal cord injuries (SCI) leading to some level of paralysis. Some of these veterans are victims of recurrent pressure injuries (PrI), some get them rarely or not at all. Previous research has indicated a relationship between intra-muscular adipose tissue (IMAT) and the incidence of recurrent PrI. Additionally, IMAT builds quickly for some with SCI, and slowly or not at all for others. A current goal of the BEIPIR project is to identify factors which contribute to both recurrent PrI and IMAT buildup in veterans with SCI. 
+
+|   While previous research found the relationship between IMAT and recurrent PrI, this study offers the opportunity to replicate that result and find new relationships. Variables of potential interest to researchers include level of paralysis, whether the patient smokes (smoking has been shown to affect fatty tissues), years since injury, age at the time of the study, and more. Understanding the relative value of these variables in directly predicting recurrent PrI or in relation to IMAT would be of great interest even before the incorporation of genetic data.
+
+## Methods
+
+### Data Summary
+
+|   Data collection for the study is ongoing; what follows is a preliminary analysis of the “pilot” data. The data set describes anonymized medical information for 103 veterans with varying levels of SCI. There are 54 potentially predictive variables; many participants have missing data in at least one of these variables. Ten of the variables are continuous; the remaining are categorical. Some of the key variables are:
+
+* PRI: 0/1 binary variables that describes whether a veteran suffers from recurrent pressure injuries.
+* IMAT: Describes 0-100 percentage of intramuscular adipose tissue.
+* AGEN: Age of participant at start of study
+* YRIN: Years since SCI
+* LOI: Level of SCI
+* ASIA: Binary variable describing whether paralysis is complete or incomplete
+
+The data names are described in the data set, "BEIPIR Master Key_Jan 2023v3b", which is available with this paper.
+
+### Exploratory Data Analysis
+
+|   IMAT is a key variable of interest. Figure 1 below gives a sample of the collected data, which is a decent fit for an exponential distribution. Other continuous variables of interest exhibit a variety of distributional patterns, as seen in Figure 2. Non-normal variables were transformed using a natural log transformation, which improved the distributions towards normality. Notably, with only 100 participants and 10 continuous variables, the multivariate CLT is likely to hold. Normality may not be a major issue. In spite of this, the transformations increase our confidence in the overall suitability of the parametric models that follow in later sections.
+
+
+```{r IMAT_hist, fig.cap="IMAT Histogram", include=FALSE, warning=FALSE, fig.height=3, eval=FALSE}
+p <- visit_one %>% ggplot(aes(x = IMAT)) +
+  geom_histogram(bins = 30) +
+  labs(x = "IMAT") +
+  g.theme
+
+ggsave("imat_hist.png", plot = p)
+
+```
+
+![IMAT Histogram](imat_hist.png)
+
+
+
+```{r other_cont, fig.cap="Other Histograms", echo=FALSE, warning=FALSE, eval=FALSE}
+other_vars <- c("AGEN", "YRIN", "BMI", "ALBM")
+plots <- list()
+
+for (i in other_vars) {
+  plots[[i]] <- visit_one %>% ggplot(aes_string(x = i)) +
+    geom_histogram(bins = 30) +
+    labs(x = i) +
+    g.theme
+}
+
+p <- grid.arrange(grobs = plots, ncol = 2)
+
+ggsave("other_hists.png", plot = p)
+
+```
+
+![Other Histograms](other_hists.png)
+
+|   The partial correlations in Figure 3 show the linear correlation between the continuous variables, *given* the effects of the other continuous variables. The clearest association is between Height, Weight, and BMI. Based on this, Height and Weight were excluded from further analyses in favor of BMI. BMI is expected to carry most of the information of the other two variables, and will avoid issues of multicollinearity. 
+
+
+```{r partial_corrs, fig.cap="Partial Correlations in Continuous Variables", echo=FALSE, fig.height=3}
+Sigma <- cor(na.omit(continuous))
+Sigma.inv <- solve(Sigma)
+Omega <- -cov2cor(Sigma.inv)
+diag(Omega) <- 1
+
+corrplot::corrplot(Omega)
+```
+
+
+```{r pairs_smooth, fig.cap="Key Continuous Variables Plotted", echo=FALSE, include=FALSE, eval=FALSE}
+p <- continuous %>% dplyr::select(IMAT, YRIN, BMI, SYRS, AGEN) %>% ggpairs()
+
+ggsave("pairs.png", plot = p, width = 5, height = 3)
+
+```
+
+![Key Continuous Variables Plotted](pairs.png)
+
+
+|   The most interesting variable in regards to IMAT is YRIN, the years since injury. This potentially implies that time spent injured has a positive linear association with IMAT. In Figure 4, we see continued potential for this in the scatter plot. However, the data is clustered in the bottom left of the curve and a linear relationship isn't immediately clear. Observing the histograms for these two variables in the figure, this becomes intuitive. Figure 5 shows a scatter plot for the 2 variables when both are log-transformed.
+
+
+```{r log_scatter_IMAT_YRIN, fig.cap="Plot after log transformation on both variables", warning=FALSE, echo=FALSE, fig.height=3, eval=FALSE, include=FALSE}
+
+p <- visit_one %>% ggplot(aes(x = log(YRIN), y = log(IMAT))) +
+  geom_point() +
+  labs(x = "YRIN") +
+  g.theme
+
+ggsave("log_trans.png", plot = p, width = 5, height = 3)
+
+```
+
+
+![Plot after log transformation on both variables](log_trans.png)
+
+
+The resulting transformation is not perfect, but is substantially improved and more likely to yield a useful insight.
+
+|   The categorical variable of greatest interest is PRI, our binary variable which describes whether the patient has reported suffering from recurrent pressure injuries. Violin plots are helpful for observing relationships between categorical and continuous variables. In Figure 6 we see a much thicker "neck" on the violin/bottle of the plot. Previous research indicated that higher IMAT was associated with recurrent pressure injuries, and the plot shows that patients with PRI are more likely to have a higher IMAT score.
+
+
+```{r violin_IMAT_PRI, fig.cap="PRI against IMAT", echo=FALSE, warning=FALSE, fig.height=3, include = FALSE, eval=FALSE}
+p <- visit_one %>% ggplot(aes(x = PRI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+
+ggsave("violin_imat_pri.png", plot = p, width = 5, height = 3)
+
+```
+
+
+![PRI against IMAT](violin_imat_pri.png)
+
+
+Other categorical variables of interest include LOI and ASIA, describing the level of injury and nature of paralysis, respectively. In Figure 7, each one displays an association with IMAT similar to that of PRI, indicating probable intermediary relevance to predicting recurrent pressure injuries directly or indirectly (mediated via IMAT).
+
+
+```{r violin_LOI_ASIA, fig.cap="LOI and ASIA against IMAT. Note the thicker 'necks' on the bottles for patients with complete paralysis", echo=FALSE, warning=FALSE, fig.height=3, fig.width=5, include=FALSE, eval=FALSE}
+
+
+p <- visit_one %>% ggplot(aes(x = LOI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+
+q <- visit_one %>% ggplot(aes(x = ASIA)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+
+r <- grid.arrange(p, q, ncol = 2)
+
+ggsave("violin_loi_asia.png", plot = r, width = 5, height = 3)
+
+```
+
+
+![LOI and ASIA against IMAT. Note the thicker 'necks' on the bottles for patients with complete paralysis](violin_loi_asia.png)
+
+### Logit Regression
+
+|   A first-pass understanding at the problem can be developed by examining a linear regression of potentially explanatory variables against IMAT. Since IMAT exists on a continuum between 1 and 100 (rather than from negative infinity to positive infinity), a transformation is necessary to meet the assumptions of the linear regression model. Then backward selection search for a reasonable, parsimonious model can be conducted.
+
+A "full" model was constructed using all reasonable variables. Variables were excluded from the full model for the following reasons:
+
+* Expectation of multicollinearity: Height and weight were excluded for the aforementioned expected multicollinearity with BMI. However, BMI was included.
+* Treatment instead of prediction: Variables that describe whether a patient uses an air cushion on their wheelchair or are currently sleeping in a hospital bed likely describe that a patient is *currently being treated* for PRI. This does not help gain understanding of variables that *predict* PRI or IMAT. Based on the needs of the study, these variables were excluded from modeling.
+
+The data is also split randomly into training and test data so that the models' performance can be evaluated against data not included in the models' training.
+
+
+```{r class_data, include=FALSE}
+# Set up data to make sure that all points have a response classification
+# clinical, biological, and social factors should take precedence over other factors like equipment which likely just show attempts to treat the issues at hand
+
+
+class_data <- visit_one %>% dplyr::filter(PRI == 'Y' | PRI == 'N')
+class_binned <- vone_binned %>% dplyr::filter(PRI == 'Y' | PRI == 'N') %>%
+  select(-WCTP, -CUTP, -BED, -MATT, -SHC, -USHC, -PRAH, -PRFQ)
+
+levels(class_data$PRI) <- c("N", "N", "Y")
+levels(class_binned$PRI) <- c("N", "N", "Y")
+
+# Randomly split to ~80% training, ~20% test
+train_samp <- sample(nrow(class_data), size = round(0.8*nrow(class_data)), replace = FALSE)
+
+class.train <- class_data[train_samp,]
+class.test <- class_data[-train_samp,]
+binned.train <- class_binned[train_samp,]
+binned.test <- class_binned[-train_samp,]
+
+
+```
+
+```{r continuous_evaluator, include=FALSE}
+evaluate <- function(model, full_model, test_data) {
+  aic <- AIC(model)
+  
+  preds <- predict(model, test_data, type = "response")
+  preds <- ifelse(preds > 0.5,1,0)
+  preds <- as.factor(preds)
+  c <- confusionMatrix(data = preds, reference = as.factor(test_data$class), positive = "1")
+  
+  new_row <- c(aic, c$overall[1])
+  return(new_row)
+
+}
+
+```
+
+```{r logit_full, echo=FALSE, warning=FALSE, fig.cap="Model Selection Criteria"}
+
+subsets <- regsubsets(log(IMAT/(100-IMAT)) ~ log(YRIN) + log(AGEN) + log(HGA1) + BMI + LOI + ASIA + PRI + SLEP + LIVS + MARS + PAIN, data = class.train, method = "backward", nvmax = 11)
+
+results <- summary(subsets)
+
+results_df <- data.frame(
+  num_variables = 1:12,
+  Adjusted_R_squared = results$adjr2,
+  Mallows_cp = results$cp,
+  BIC = results$bic
+)
+
+results_df
+
+```
+
+The output of the backward-selection function gives some useful statistics for deciding on a parsimonious model. The function examines best-fit models for a given number of variables, and provides model selection criteria for these best-fit models. Higher adjusted r-squareds are desirable, corresponding to a penalized mean squared error estimate. A lower Mallow's Cp indicates a better model, however a negative value here indicates a terrible model. Finally, a lower BIC is always better.
+
+|   Looking through the above models, the BIC informs us that the models between 2 and 7 variables perform best. However, our best models for 5 and 6 variables have a negative Mallow's Cp, so those should be excluded. Finally, we see that more variables yield higher adjusted R-squared values, despite the penalty included in the statistic for more variables. My interest is therefore turned to the 3, 4, and 7 variable models.
+
+* Best 3 variable model: YRIN, LOI, SLEP
+* Best 4 variable model: YRIN, AGEN, LOI, SLEP
+* Best 7 variable model: YRIN, AGEN, LOI, SLEP, MARS, PAIN
+
+The 7 variable model is suspect for including the marital status variable, with specific interest in combining those who are living with their partner and those who are widowed. It will therefore be excluded from the following discussion.
+
+```{r imat_in_test, echo=FALSE}
+lin.3 <- lm(log(IMAT/(100-IMAT)) ~ log(YRIN) + LOI + SLEP, data = class.train)
+lin.4 <- lm(log(IMAT/(100-IMAT)) ~ log(YRIN) + log(AGEN) + LOI + SLEP, data = class.train)
+
+pred3 <- predict(lin.3, class.test)
+pred4 <- predict(lin.4, class.test)
+
+back_transform <- function(d) {
+  return((100*(exp(1)^d))/(1 + (exp(1)^d)))
+}
+
+pred3 <- back_transform(pred3)
+pred4 <- back_transform(pred4)
+
+pred_v_act <- data.frame(pred3, pred4, actual = class.test$IMAT)
+
+# Exclude line 19 for an NA IMAt value:
+pred_v_act <- pred_v_act[-19,]
+
+pred_v_act <- pred_v_act %>% mutate(resid3 = pred3-actual,
+                                    resid4 = pred4-actual)
+
+mse3 <- mean(pred_v_act$resid3^2)
+mse4 <- mean(pred_v_act$resid4^2)
+
+m3 <- paste("MSE For 3 Variable Model:", mse3)
+m4 <- paste("MSE For 4 Variable Model:", mse4)
+
+print(m3)
+print(m4)
+
+```
+
+The MSE for both models are very close. I suspect the 3-variable model is underspecified, and would therefore likely choose the 4-variable model. We have reason to believe that older individuals would have a higher IMAT, and therefore we would expect age to play a role in the IMAT score of an individual.
+
+### Logistic Regression
+
+|   For a linear classification model, we can use a logistic model. This model can be used to try to predict whether a particular veteran will suffer from recurrent pressure injuries based on the various model factors. Logistic regressions can be rather weak if the classes they are predicting are not linearly separable, so this functions more as a baseline for comparing later models than for its own predictive value. It may also reveal some of the more predictive variables.
+
+|   Variables were included that might be predictive of PRI, based on past information and the data exploration in the above section: IMAT (log-transformed), YRIN (log-transformed), HGA1 (log-transformed), LOI, ASIA, and BMI. Each worst variable in the resulting model was then removed one by one in a stepwise backwards-selection method, leaving only IMAT and ASIA at the end. The results are show below.
+
+
+```{r logistic, echo=FALSE, include=FALSE}
+logistic.a <- glm(PRI ~ log(IMAT) + log(YRIN) + log(AGEN) + log(HGA1) + LOI + ASIA + BMI, data = class.train, family = binomial)
+
+logistic.b <- glm(PRI ~ log(IMAT) + log(YRIN) + log(AGEN) + LOI + ASIA + BMI, data = class.train, family = binomial)
+
+logistic.c <- glm(PRI ~ log(IMAT) + log(YRIN) + log(AGEN) + LOI + ASIA, data = class.train, family = binomial)
+
+
+logistic.d <- glm(PRI ~ log(IMAT) + log(AGEN) + LOI + ASIA, data = class.train, family = binomial)
+
+
+logistic.e <- glm(PRI ~ log(IMAT) + log(AGEN) + ASIA, data = class.train, family = binomial)
+
+
+logistic.f <- glm(PRI ~ log(IMAT) + ASIA, data = class.train, family = binomial)
+
+```
+
+```{r evaluate_logistic, echo=FALSE}
+
+evaluate_logistic <- function(model, test_data) {
+  aic <- AIC(model)
+  preds <- predict(model, test_data, type = "response")
+  act <- ifelse(test_data$PRI == "Y", 1, 0)
+  act <- act[!is.na(preds)]
+  preds <- na.omit(preds)
+  preds <- ifelse(preds > 0.5,1,0)
+  inacc <- preds - act
+
+  new_row <- c(aic, 1 - mean(abs(inacc)))
+  return(new_row)
+
+}
+
+models <- data.frame(matrix(nrow = 0, ncol = 2))
+colnames(models) <- c("AIC", "Accuracy_in_Test")
+
+models[1,] <- evaluate_logistic(logistic.a, class.test)
+models[2,] <- evaluate_logistic(logistic.b, class.test)
+models[3,] <- evaluate_logistic(logistic.c, class.test)
+models[4,] <- evaluate_logistic(logistic.d, class.test)
+models[5,] <- evaluate_logistic(logistic.e, class.test)
+models[6,] <- evaluate_logistic(logistic.f, class.test)
+
+models
+
+```
+
+The lowest AIC value corresponds to the "full" model, which also has the worst accuracy in the test set. However, models 2, 3, and 4 perform best in the test set with high AICs. I think this speaks to the non separability of the data using a linear method. I would be hesitant to pick any of these models as a "good" model.
+
+### Tree-Based Model: IMAT
+
+```{r imat_trees, echo=FALSE, include=FALSE, warning=FALSE}
+
+imat.cart <- rpart(IMAT ~ ., data = class.train, method = "anova", control = rpart.control(xval = nrow(class.train)))
+imat.cart.forced <- rpart(IMAT ~ SLEP + PAIN + IMAT + AGEN + YRIN + ASIA, data = class.train, method = "anova", control = rpart.control(xval = nrow(class.train)))
+
+evaluate_imat <- function(model, test_data) {
+  act <- na.omit(test_data$IMAT)
+  preds <- predict(model, test_data)
+  preds <- preds[!is.na(test_data$IMAT)]
+  resids <- preds - act
+  
+  return(mean(resids^2))
+}
+
+c.full.test <- evaluate_imat(imat.cart, class.test)
+c.full.train <- evaluate_imat(imat.cart, class.train)
+c.forced.test <- evaluate_imat(imat.cart.forced, class.test)
+c.forced.train <- evaluate_imat(imat.cart.forced, class.train)
+
+trees <- data.frame(matrix(nrow = 2, ncol = 3))
+colnames(trees) <- c("Tree", "Accuracy_in_test", "Accuracy_in_train")
+
+trees[1,] <- c("Full", c.full.test, c.full.train)
+trees[2,] <- c("Restricted", c.forced.test, c.forced.train)
+
+trees <- trees %>% mutate(across(Accuracy_in_test:Accuracy_in_train, as.numeric)) 
+
+trees
+
+```
+
+Two tree-based methods for modeling IMAT are considered here. The "Full" model permits ANY variable in the data set, while the "restricted" model permits only those that were considered of interest to researchers. The variables permitted in the restricted model were: SLEP, PAIN, IMAT, AGEN, YRIN, and ASIA. The restricted model performs notably worse in both test and training, up to about three times as badly in the test set and almost as poorly in the training set. The composition of the trees are given in figures 8 and 9 below.
+
+The model was trained using leave-one-out cross-validation.
+
+```{r cont_tree_plots, echo=FALSE, fig.cap="IMAT Tree, Full"}
+ 
+fancyRpartPlot(imat.cart)
+
+```
+
+
+```{r cont_tree_2, echo=FALSE, fig.cap="IMAT Tree, Restricted"}
+
+fancyRpartPlot(imat.cart.forced)
+
+```
+
+
+
+### Tree-Based Model: PrI
+
+|   A total of eight trees were trained for the prediction of PRI. These included the full and restricted variable sets as with IMAT, but also "binned" data sets. These "binned" sets took continuous variables and sliced them into categorical variables with different levels. Levels were chosen based on expert opinion and natural breaks in the data sets. A fourth tree was trained using the binned & restricted variable set. The four trees are included in Figures 10-13 below.
+
+```{r pri_trees, include=FALSE}
+
+
+
+confusion_matrix <- function(object, newdata) {
+  preds <- as.data.frame(predict(object, newdata)) %>% mutate(YorN = case_when(
+  Y >= 0.5 ~ "Y",
+  TRUE ~ "N"
+)) %>% mutate(across(YorN, as.factor))
+  
+  caret::confusionMatrix(data = preds$YorN, reference = newdata$PRI, positive = "Y")
+}
+
+pri.no_test <- rpart(PRI ~ ., data = class_data, method = "class", control = rpart.control(xval = nrow(class_data)))
+pri.cart <- rpart(PRI ~ ., data = class.train, method = "class", control = rpart.control(xval = nrow(class.train)))
+pri.cart.binned <- rpart(PRI ~ ., data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.cart.forced <- rpart(PRI ~ SLEP + PAIN + IMAT + AGEN + YRIN + ASIA, data = class.train, method = "class", control = rpart.control(xval = nrow(class.train)))
+pri.cart.forced.binned <- rpart(PRI ~ SLEP + PAIN + IMAT + AGEN + YRIN + ASIA, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+  
+
+c.full.test <- confusion_matrix(pri.cart, class.test)
+c.full.train <- confusion_matrix(pri.cart, class.train)
+c.binned.test <- confusion_matrix(pri.cart.binned, binned.test)
+c.binned.train <- confusion_matrix(pri.cart.binned, binned.train)
+c.forced.test <- confusion_matrix(pri.cart.forced, class.test)
+c.forced.train <- confusion_matrix(pri.cart.forced, class.train)
+c.forced.binned.test <- confusion_matrix(pri.cart.forced.binned, binned.test)
+c.forced.binned.train <- confusion_matrix(pri.cart.forced.binned, binned.train)
+
+trees <- data.frame(matrix(nrow = 8, ncol = 5))
+colnames(trees) <- c("Tree", "Accuracy", "Sensitivity", "Specificity", "Precision")
+
+trees[1,] <- c("Full/test", c.full.test$overall[1], c.full.test$byClass[1], c.full.test$byClass[2], c.full.test$byClass[5])
+trees[2,] <- c("Full/train", c.full.train$overall[1], c.full.train$byClass[1], c.full.train$byClass[2], c.full.train$byClass[5])
+trees[3,] <- c("Binned/test", c.binned.test$overall[1], c.binned.test$byClass[1], c.binned.test$byClass[2], c.binned.test$byClass[5])
+trees[4,] <- c("Binned/train", c.binned.train$overall[1], c.binned.train$byClass[1], c.binned.train$byClass[2], c.binned.train$byClass[5])
+trees[5,] <- c("Restricted/test", c.forced.test$overall[1], c.forced.test$byClass[1], c.forced.test$byClass[2], c.forced.test$byClass[5])
+trees[6,] <- c("Restricted/train", c.forced.train$overall[1], c.forced.train$byClass[1], c.forced.train$byClass[2], c.forced.train$byClass[5])
+trees[7,] <- c("Restricted & Binned/test", c.forced.binned.test$overall[1], c.forced.binned.test$byClass[1], c.forced.binned.test$byClass[2], c.forced.binned.test$byClass[5])
+trees[8,] <- c("Restricted & Binned/train", c.forced.binned.train$overall[1], c.forced.binned.train$byClass[1], c.forced.binned.train$byClass[2], c.forced.binned.train$byClass[5])
+
+trees %>% mutate(across(Accuracy:Precision, as.numeric)) 
+
+
+```
+
+
+```{r pri_tree_graphics, include=FALSE, eval=FALSE}
+
+
+tree_plot <- function(tree, title) {
+  g <- ggparty(as.party(tree)) + 
+  ggtitle(title) +
+  geom_edge() +
+  geom_edge_label() +
+  geom_node_label(line_list = list(aes(label = splitvar),
+                                   aes(label = paste0("N=", nodesize), 
+                                       size = 10)),
+                  line_gpar = list(list(size = 13), 
+                                   list(size = 10)), 
+                  ids = "inner") +
+  geom_node_plot(gglist = list(
+    geom_bar(aes(x = "", fill = PRI),
+             position = position_fill(), color = "black"),
+      theme_minimal(),
+      scale_fill_manual(values = c("gray50", "gray80"), guide = FALSE),
+      scale_y_continuous(breaks = c(0, 1)),
+    xlab(""), 
+    ylab("Probability"),
+    geom_text(aes(x = "", group = PRI,
+                  label = stat(count)),
+              stat = "count", position = position_fill(), vjust = 1.1)),
+    shared_axis_labels = TRUE)
+  return(g)
+}
+
+confusion_matrix <- function(object, newdata) {
+  preds <- as.data.frame(predict(object, newdata)) %>% mutate(YorN = case_when(
+  Y >= 0.5 ~ "Y",
+  TRUE ~ "N"
+)) %>% mutate(across(YorN, as.factor))
+  
+  caret::confusionMatrix(data = preds$YorN, reference = newdata$PRI, positive = "Y")
+}
+
+p.full <- tree_plot(pri.cart, 
+          title = "PRI Classification Tree (Full)") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.no_test <- tree_plot(pri.no_test, 
+          title = "PRI Classification Tree (Full) With All Data") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.binned <- tree_plot(pri.cart.binned,
+          title = "Binned PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.restrict <- tree_plot(pri.cart.forced,
+          title = "Reduced Variables PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.restrict.binned <- tree_plot(pri.cart.forced.binned,
+                               title = "Reduced Variables with Binning PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+ggsave("p_full.png", plot = p.full, width = 5, height = 3)
+ggsave("p_binned.png", plot = p.binned, width = 5, height = 3)
+ggsave("p_restrict.png", plot = p.restrict, width = 5, height = 3)
+ggsave("p_restrict_binned.png", plot = p.restrict.binned, width = 5, height = 3)
+
+
+
+
+```
+
+
+![Full Tree](p_full.png)
+
+
+![Binned Tree](p_binned.png)
+
+![Restricted Tree](p_restrict.png)
+
+![Binned & Restricted Tree](p_restrict_binned.png)
+
+Generally, the four models perform reasonably well in the test & training sets. Most are able to detect recurrent pressure injuries at a level greater than chance. The restricted model has issues with sensitivity and precision, and I might not put too much confidence in it. Interestingly, the binned & restricted model performs best on the test set (though not by much). This is the model most informed by expert opinion, and so it may be that it is informed by prior informtion in a way that overall benefits the model.
+
+The model was also trained using leave-one-out cross-validation.
+
+### Correspondence Analysis
+
+```{r ca, include=FALSE, eval=FALSE, echo=FALSE}
+
+
+mca_dat <- vone_binned
+
+cats = apply(mca_dat, 2, function(x) nlevels(as.factor(x)))
+
+visit_one.ca <- MCA(X = mca_dat, graph = FALSE)
+mca_eig <- as.data.frame(visit_one.ca$eig)
+# data frames for ggplot
+
+# mca1_vars_df = data.frame(visit_one.ca$var$coord, Variable = rep(names(cats), 
+#     cats))
+# mca1_obs_df = data.frame(visit_one.ca$ind$coord)
+
+scree <- mca_eig %>% ggplot(aes(x = 1:nrow(mca_eig), y = `percentage of variance`)) +
+  geom_point() +
+  geom_line() +
+  g.theme
+
+ggsave("scree.png", plot=scree, width = 4, height = 4)
+
+
+
+# 
+# 
+# # plot of variable categories
+# mca.plot <- ggplot(data = mca1_vars_df, aes(x = Dim.1, y = Dim.2, label = rownames(mca1_vars_df))) +
+#   geom_hline(yintercept = 0, colour = "gray70") +
+#   geom_vline(xintercept = 0, colour = "gray70") +
+#   # geom_point(colour = "gray50", alpha = 0.7) +
+#   geom_density2d(colour = "gray80") +
+#   geom_text(data = mca1_vars_df, aes(x = Dim.1, y = Dim.2, label = rownames(mca1_vars_df), colour = Variable), size = 2.5) +
+#   ggtitle("MCA plot of variables using R package FactoMineR") + scale_colour_discrete(name = "Variable") +
+#   g.theme
+# mca.plot
+
+# options(repr.plot.width =20, repr.plot.height =20)
+
+# ggsave("mca_plot.png", plot = mca.plot, width = 30, height = 30)
+
+var_names <- rownames(visit_one.ca$var$contrib)
+undesired_vars1 <- c("YRIN.NA", "ASIA_Unk", "PRI_Unk", "IMAT.NA", "DIAB_unk", "PAIN_N/A", "PAIN_unk", "SLEP_N/A", "SLEP_unk", "HGA1.NA", "SHC_unk", "USHC_unk", "PRAH_unk", "PRFQ_unk", "HRSC.NA", "MARS_unk")
+
+#desired_variables <- var_names[!var_names %in% undesired_vars1] 
+desired_variables <- c("PRI_Y", "PRI_N", "IMAT_xhi", "IMAT_hi", "IMAT_med", "IMAT_low", "AGEN_yng", "AGEN_mid", "AGEN_old", "AGEN_sen", "yng", "mid", "old", "sen", "MARS_M1", "MARS_M2", "MARS_M3", "MARS_M4", "MARS_M5", "YRIN_sht", "YRIN_med", "YRIN_long", "LIVS_L1", "LIVS_L2", "LIVS_L3", "LIVS_L4")
+
+p <- fviz_mca_var(visit_one.ca, col.var = "steelblue", 
+             select.var = list(name = desired_variables), repel = TRUE) +
+  geom_circle(aes(x0 = 0.42, y0 = -0.45, r = 0.2), color = "red", fill = "transparent") +
+  geom_ellipse(aes(x0 = -0.3, y0 = 0.33, a = 0.33, b = 0.36, angle = 0), color = "red", fill = "transparent") +
+  g.theme
+
+ggsave("correspondence.png", p, height = 7, width = 7, dpi=300)
+
+```
+
+
+![Scree Plot](scree.png)
+
+
+![Correspondence Analysis](correspondence.png)
+
+
+|   The correspondence analysis examines the relationship between all of the variables (continuous variables are examined as binned into categorical values). The full CA plot is clogged and difficult to read, so I have removed the extraneous variables to leave a clear picture. The plot in Figure 14 is the scree plot for the correspondence analysis. As CA is roughly similar to PCA, so the scree plot carries similary information. Technically, the scree plot here carries information about the **inertia** of the variable dimensions. However, this is itself roughly equivalent to variance, so the percent variance label is not misleading. 
+
+|   Unfortunately for our analysis, the percentage of variance explained by the first few dimensions is quite low. This indicates a noisy data set. However, it doesn't mean that there is no signal in the noise. Indeed, examining the cleaned plot in Figure 15 gives a strong picture of potentially related variables. PRI_Y indicates a person with recurrent PRI. These are most related to having a high or extra-high IMAT. They also cluster with marital status M4: divorced. It is not unreasonable to think that divorced people with SCIs may have more trouble preventing PRIs, and thus suffer from recurrent PRIs.
+
+|   On the other end of the plot is PRI_N, indicating patients who do not suffer from recurrent PRI. This was most closely associated with a low IMAT and being in "living situation" L2: with family. It is again not unreasonable to think that those who live with other people might be better positioned to prevent PRI. Indeed, marital statuses M1 & M2 are nearby, corresponding to patients who are married or living with a partner (respectively). And finally, those who were more recently injured (within the last 8 years) are somewhat associated with PRI_N.
+
+
+## Results
+
+|   Overall, the various analyses provide mixed results. We might look at the classifications and observe that the logistic regression does about 50% better than a weakly-informed guess in the data set. That is, roughly 40% of patients in the data set suffer from PRI, so a weakly informed person might guess this at random 40% of the time and be correct about 50% of the time.  The logistic regressions performed about 10-20% better in the test set, so they aren't particularly inspiring. Indeed, several of the logistic regressions have the same score in the test set, indicating that the additional variables had no effect.
+
+|   The tree-based classifications performed substantially better in the same test data and produced far more valuable insights. IMAT continues to be a primary variable contributing to recurrent PRI, and this reinforces previous research in the field. The tree-based models consistently identified IMAT, ASIA, and YRIN as contributing factors to recurrent PRI. This reinforces intuition by researchers and provides ideas for other research and models moving forward.
+
+|   Predicting IMAT proved to be a difficult matter. Most models had an MSE of about 1000 in the test data, with only the full tree model giving an MSE of about 1/3 of that. It's possible that the model is overfit, and indeed examining the tree indicates that several of the branches should probably be pruned. Still, there is some value in the model. It also picks up on YRIN as being a major factor, which would be of interest to researchers as a contributor and not found in the upcoming genetic data set. 
+
+## Discussion and Conclusions
+
+|   Overall, the analysis indicates that there is some signal in a noisy data set. The most interesting analysis proved to be the correspondence analysis, as it showed clinically useful relationships between variables. Effectively, it gives us some confidence in saying that a veteran's IMAT and whether they live alone are potentially important factors in determining the risk of recurrent pressure injuries. In several analyses, various factors related to living alone appeared in the data. It might be helpful to combine these factors in a future analysis (e.g. "lives alone" vs. "doesn't live alone") to potentially strengthen and clarify the association.
+
+|   Other useful factors included years since injury and age. Both of these carried some moderately predictive qualities for recurrent PRI and higher IMAT, and neither will be found in the genetic data when it is made available.
+
+|   None of the analyses were truly powerful and convincing when it came to understanding IMAT. This is not entirely unexpected: the entire purpose of the genetic study is to attempt to elucidate underlying factors that would explain IMAT variance. Indeed, were any of these models able to predict IMAT with great accuracy, there would be little value in expending research money on the genetic data. It is reasonable to expect that the genetic data will act as a "missing puzzle piece." However, given the overall low amount of phenotypic variance usually explained by genetic data, there will doubtless be more to learn even after its incorporation into the model.
+
+
+## Acknowledgements
+
+|   I would like to thank Dr. Sun, Dr. Bogie, and all of the other researchers on the BEIPIR project who have put great effort into collecting this data and helping to interpret it. Without the hard work of procuring data and the curiosity of inquisitive minds, the science of statistics would not exist!
+
+## Appendix
+
+
+```{r read_in_appendix, eval=FALSE}
+
+baseline <- read_excel("OG Files/BEIPIR Master Key_Jan 2023v3b.xlsx", 
+    sheet = "Baseline visit only")
+
+all_at_once <- read_excel("OG Files/BEIPIR Master Key_Jan 2023v3b.xlsx", 
+    sheet = "Everything all together")
+
+```
+
+```{r data_setup_and_wrangling_appendix, eval=FALSE}
+# All At Once Data
+all_at_once <- all_at_once %>% mutate(across(SUBJ:YRIN, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(RACE:PRI, factor))
+all_at_once <- all_at_once %>% mutate(across(IMAT, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(WCTP:SMOK, factor))
+all_at_once <- all_at_once %>% mutate(across(SYRS:HGA1, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(LIVS:PRFQ, factor))
+all_at_once <- all_at_once %>% mutate(across(HRSC, as.numeric))
+all_at_once <- all_at_once %>% mutate(across(EMPL:EDUC, factor))
+
+# Baseline data (obv I figured out the tidyverse way to do this later lol)
+baseline$SUBJ <- as.integer(baseline$SUBJ)
+baseline$VINO <- as.integer(baseline$VINO)
+baseline$YRIN <- as.numeric(baseline$YRIN)
+baseline$RACE <- as_factor(baseline$RACE)
+baseline$ETHN <- as_factor(baseline$ETHN)
+baseline$GEND <- as_factor(baseline$GEND)
+baseline$LOI <- as_factor(baseline$LOI)
+baseline$ASIA <- as_factor(baseline$ASIA)
+baseline$PRI <- as_factor(baseline$PRI)
+baseline$IMAT <- as.numeric(baseline$IMAT)
+baseline$NUTI <- as_factor(baseline$NUTI)
+baseline$BOI <- as_factor(baseline$BOI)
+baseline$BLI <- as_factor(baseline$BLI)
+baseline$VASC <- as_factor(baseline$VASC)
+baseline$RESP <- as_factor(baseline$RESP)
+baseline$PNEU <- as_factor(baseline$PNEU)
+baseline$DIAB <- as_factor(baseline$DIAB)
+baseline$DEPR <- as_factor(baseline$DEPR)
+baseline$ANXI <- as_factor(baseline$ANXI)
+baseline$PAIN <- as_factor(baseline$PAIN)
+baseline$SLEP <- as_factor(baseline$SLEP)
+baseline$ALCO <- as_factor(baseline$ALCO)
+baseline$NODR <- as_factor(baseline$NODR)
+baseline$DRUG <- as_factor(baseline$DRUG)
+baseline$SMOK <- as_factor(baseline$SMOK) 
+baseline$SYRS <- as.numeric(baseline$SYRS) # smoking years is interesting because there are numbers (for number of smmoking years), N/A (for non-smokers), and "unk" for unknown (data not collected). might want to split this into 2 later: one as factor and one as actual years
+baseline$BMI <- as.numeric(baseline$BMI)
+baseline$LIVS <- as_factor(baseline$LIVS)
+baseline$EMPL <- as_factor(baseline$EMPL)
+baseline$MARS <- as_factor(baseline$MARS)
+baseline$EDUC <- as_factor(baseline$EDUC)
+
+# Fix Entry Errors
+levels(all_at_once$ETHN) <- c("Hs/L", "Hs/L", "Not Hs/L", "unk")
+levels(all_at_once$WCTP) <- c("AmnWC", "MWc", "MWc", "OWc", "PWc", "TRWc")
+levels(all_at_once$CUTP) <- c("ACu", "ACu", "FCu", "FCu", "LCu", "NoCu", "OCu")
+
+# Albumin values of 999 are equivalent to NA
+
+
+# Pick only visit 1
+visit_one <- all_at_once[, -46:-56] %>% 
+  dplyr::filter(VINO == 1) %>%
+  dplyr::select(-SUBJ, -VINO) %>%
+  dplyr::filter(ALBM < 999)
+
+
+
+# Bin the continuous variables based on the following criteria:
+# AGEN: 
+# 0 - 40: young
+# 41 - 55: middle age
+# 56-65: old mid
+# 66+: old
+# 
+# YRIN:
+# 0-8: low
+# 9-23: mid
+# 24+: high
+# 
+# IMAT:
+# 0-15
+# 16-21
+# 21-50
+# 50+
+# 
+# SYRS:
+# 5
+# 6-10
+# 11-20
+# 21+
+# 
+# HT, WT - ignore
+# 
+# BMI: 
+# 22
+# 25
+# 30
+# 40?
+# 
+# ALBM
+# 0-3: low
+# 3-5.5: NORMAL
+# 5.5+ high
+# 
+# HGA1:
+# 0-5.7: normal
+# 5.7+: pre-diabetic
+# 6.0+: diabetic
+# 
+# HRSC:
+# 0-4:
+# 5-12:
+# 13+:
+
+vone_binned <- visit_one %>% mutate(AGEN = cut(AGEN, breaks = c(-Inf, 40, 55, 65, Inf), labels = c("yng", "mid", "old", "sen")),
+                                    YRIN = cut(YRIN, breaks = c(-Inf, 8, 23, Inf), labels = c("sht", "med", "lng")),
+                                    IMAT = cut(IMAT, breaks = c(-Inf, 15, 21, 50, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    SYRS = cut(SYRS, breaks = c(-Inf, 5, 10, 20, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    BMI = cut(BMI, breaks = c(-Inf, 22, 25, 30, Inf), labels = c("low", "med", "hi", "xhi")),
+                                    ALBM = cut(ALBM, breaks = c(-Inf, 3, 5.5, Inf), labels = c("low", "nrm", "hi")),
+                                    HGA1 = cut(HGA1, breaks = c(-Inf, 5.7, 6.0, Inf), labels = c("nrm", "pred", "diab")),
+                                    HRSC = cut(HRSC, breaks = c(-Inf, 4, 12, Inf), labels = c("low", "med", "hi"))) %>%
+  select(-WT, -HT)
+
+categoricals <- visit_one %>% dplyr::select(where(is.factor) | IMAT)
+continuous <- visit_one %>% dplyr::select(where(is.numeric))
+
+```
+
+
+```{r themes_appendix, eval=FALSE}
+g.theme <- theme_stata()
+```
+
+
+```{r appendix, fig.width=10, echo=FALSE, warning=FALSE, eval=FALSE}
+# Make categorical violins against IMAT
+for (i in colnames(categoricals)) {
+  if(i != "IMAT") {
+    p <- visit_one %>% ggplot(aes_string(x = i, y = "IMAT")) +
+    geom_violin() +
+    labs(x = i) +
+    g.theme
+  
+    print(p)
+  }
+}
+
+# Make counts for categorical vs. PRI
+for (i in colnames(categoricals)) {
+  if(i != "PRI") {
+    p <- visit_one %>% ggplot(aes_string(x = i, y = "PRI")) +
+      geom_count() +
+      labs(x = i) +
+      g.theme
+    
+    print(p)
+  }
+}
+
+# Make violins for PRI against continuous
+for (i in colnames(continuous)) {
+  p <- visit_one %>% ggplot(aes_string(x = "PRI", y = i)) +
+  geom_violin() +
+  labs(y = i) +
+  g.theme
+
+  print(p)
+}
+
+# Make histograms for numerical data
+for (i in colnames(continuous)) {
+  p <- visit_one %>% ggplot(aes_string(x = i)) +
+    geom_histogram(bins = 30) +
+    labs(x = i) +
+    g.theme
+  
+  print(p)
+}
+
+
+# Make LOG histograms for numerical data
+# for (i in colnames(continuous)) {
+#   p <- visit_one %>% ggplot(aes_string(x = log(i))) +
+#     geom_histogram(bins = 30) +
+#     labs(x = i) +
+#     g.theme
+#   
+#   print(p)
+#   
+# }
+
+# Make scatters for numerical data against IMAT
+
+for (i in colnames(continuous)) {
+  if(i != "IMAT") {
+    p <- visit_one %>% ggplot(aes_string(x = i, y = "IMAT")) +
+      geom_point() +
+      labs(x = i) +
+      g.theme
+    
+    print(p)
+  }
+}
+
+pairs(continuous)
+
+```
+
+```{r baseline_categorical_EDA_reduced, warning=FALSE, echo=FALSE, eval=FALSE}
+
+
+categoricals <- visit_one %>% dplyr::select(is.factor | IMAT)
+continuous <- visit_one %>% dplyr::select(is.numeric)
+
+p <- visit_one %>% ggplot(aes(x = PRI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+p <- visit_one %>% ggplot(aes(x = LOI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+
+p <- visit_one %>% ggplot(aes(x = ASIA)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+
+p <- visit_one %>% ggplot(aes(x = GEND)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+
+p <- visit_one %>% ggplot(aes(x = BOI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+
+p <- visit_one %>% ggplot(aes(x = BLI)) +
+  geom_violin(aes(y = IMAT)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  g.theme
+print(p)
+
+
+# Make violins for PRI against continuous
+for (i in colnames(continuous)) {
+  p <- visit_one %>% ggplot(aes_string(x = "PRI")) +
+  geom_violin(aes_string(y = i)) +
+  geom_text(stat='count', aes(label=..count..)) +
+  labs(y = i) +
+  g.theme
+
+  print(p)
+}
+
+# Make counts for categorical vs. PRI
+
+p <- visit_one %>% ggplot(aes(x = LOI, y = PRI)) +
+  geom_count() +
+  g.theme
+print(p)
+table(categoricals$LOI, categoricals$PRI)
+
+p <- visit_one %>% ggplot(aes(x = ASIA, y = PRI)) +
+  geom_count() +
+  g.theme
+print(p)
+table(categoricals$ASIA, categoricals$PRI)
+
+p <- visit_one %>% ggplot(aes(x = CUTP, y = PRI)) +
+  geom_count() +
+  g.theme
+print(p)
+table(categoricals$CUTP, categoricals$PRI)
+
+p <- visit_one %>% ggplot(aes(x = BED, y = PRI)) +
+  geom_count() +
+  g.theme
+print(p)
+table(categoricals$BED, categoricals$PRI)
+
+
+# Make scatters for numerical data against IMAT
+
+
+continuous %>% dplyr::select(-HGA1, -ALBM, -WT, -HT, -HRSC) %>% pairs(panel = panel.smooth, lwd = 2, cex = 1.5, col = 4)
+
+
+print("Summary")
+summary(visit_one)
+
+print("Partial Correlations")
+Sigma <- cor(na.omit(continuous))
+Sigma.inv <- solve(Sigma)
+Omega <- -cov2cor(Sigma.inv)
+diag(Omega) <- 1
+Omega
+
+corrplot::corrplot(Omega)
+
+## Standardized distances 
+print("Standardized Distances Check")
+scaled_continuous <- scale(continuous)
+continuous.scaled_dist <- pdist(na.omit(scaled_continuous), "euclidean")/sqrt(ncol(continuous)-1)
+boxplot(as.vector(continuous.scaled_dist))
+
+# Try binning continuous variables using CART.
+# Use 'cex' to pick size of things, use ggplot for plotting of analysis
+# Try plotting first 3 dimensions
+# Set a diff color for each variable 
+# After plotting and understanding, remove variables that don't seem to have a relationship so that plot looks cleaner
+# use lower case
+# take out center variables
+# draw densities around remaining variables
+
+mca_dat <- vone_binned
+
+cats = apply(mca_dat, 2, function(x) nlevels(as.factor(x)))
+
+visit_one.ca <- MCA(X = mca_dat, graph = FALSE)
+mca_eig <- as.data.frame(visit_one.ca$eig)
+# data frames for ggplot
+
+# mca1_vars_df = data.frame(visit_one.ca$var$coord, Variable = rep(names(cats), 
+#     cats))
+# mca1_obs_df = data.frame(visit_one.ca$ind$coord)
+
+scree <- mca_eig %>% ggplot(aes(x = 1:nrow(mca_eig), y = `percentage of variance`)) +
+  geom_point() +
+  geom_line() +
+  g.theme
+scree
+# 
+# 
+# # plot of variable categories
+# mca.plot <- ggplot(data = mca1_vars_df, aes(x = Dim.1, y = Dim.2, label = rownames(mca1_vars_df))) +
+#   geom_hline(yintercept = 0, colour = "gray70") +
+#   geom_vline(xintercept = 0, colour = "gray70") +
+#   # geom_point(colour = "gray50", alpha = 0.7) +
+#   geom_density2d(colour = "gray80") +
+#   geom_text(data = mca1_vars_df, aes(x = Dim.1, y = Dim.2, label = rownames(mca1_vars_df), colour = Variable), size = 2.5) +
+#   ggtitle("MCA plot of variables using R package FactoMineR") + scale_colour_discrete(name = "Variable") +
+#   g.theme
+# mca.plot
+
+# options(repr.plot.width =20, repr.plot.height =20)
+
+# ggsave("mca_plot.png", plot = mca.plot, width = 30, height = 30)
+
+var_names <- rownames(visit_one.ca$var$contrib)
+undesired_vars1 <- c("YRIN.NA", "ASIA_Unk", "PRI_Unk", "IMAT.NA", "DIAB_unk", "PAIN_N/A", "PAIN_unk", "SLEP_N/A", "SLEP_unk", "HGA1.NA", "SHC_unk", "USHC_unk", "PRAH_unk", "PRFQ_unk", "HRSC.NA", "MARS_unk")
+
+desired_variables <- var_names[!var_names %in% undesired_vars1] 
+
+
+p <- fviz_mca_var(visit_one.ca, col.var = "steelblue", repel = TRUE, 
+             select.var = list(name = desired_variables)) +
+  geom_circle(aes(x0 = -1.1, y0 = 0.9, r = 0.4), color = "red", fill = "transparent") +
+  geom_circle(aes(x0 = 1.25, y0 = 0.75, r = 0.2), color = "red", fill = "transparent") +
+  geom_circle(aes(x0 = 1.6, y0 = -1.25, r = 0.4), color = "red", fill = "transparent") +
+  geom_ellipse(aes(x0 = 0, y0 = -0.97, a = 0.53, b = 0.3, angle = 0), color = "red", fill = "transparent") +
+  g.theme
+p
+ggsave("correspondence.png", p, dpi = 300)
+
+
+# Just some stuff that looked good in the EDA
+#ln(y/(1-y))
+print("Guesses from EDA")
+linear.a <- lm(log(IMAT/(100-IMAT)) ~ YRIN + AGEN + HGA1 + LOI + ASIA + PRI + BED + PRAH, data = visit_one)
+summary(linear.a)
+
+
+print("Transformed Guesses from EDA")
+linear.b <- lm(log(IMAT/(100-IMAT)) ~ log(YRIN) + log(AGEN) + log(HGA1) + LOI + ASIA + PRI + BED + PRAH, data = visit_one)
+summary(linear.b)
+
+
+print("Refining a bit")
+# Taking out BED
+linear.c <- lm(log(IMAT/(100-IMAT)) ~ log(YRIN) + log(AGEN) + LOI + ASIA + PRI, data = visit_one)
+summary(linear.c)
+
+# Set up data to make sure that all points have a response classification
+# clinical, biological, and social factors should take precedence over other factors like equipment which likely just show attempts to treat the issues at hand
+
+class_data <- visit_one %>% dplyr::filter(PRI == 'Y' | PRI == 'N')
+class_binned <- vone_binned %>% dplyr::filter(PRI == 'Y' | PRI == 'N') %>%
+  select(-WCTP, -CUTP, -BED, -MATT, -SHC, -USHC, -PRAH, -PRFQ)
+
+levels(class_data$PRI) <- c("N", "N", "Y")
+levels(class_binned$PRI) <- c("N", "N", "Y")
+
+# Randomly split to ~80% training, ~20% test
+train_samp <- sample(nrow(class_data), size = round(0.8*nrow(class_data)), replace = FALSE)
+
+class.train <- class_data[train_samp,]
+class.test <- class_data[-train_samp,]
+binned.train <- class_binned[train_samp,]
+binned.test <- class_binned[-train_samp,]
+
+#omitting PRFQ because too many NAs
+
+logistic.a <- glm(PRI ~ log(IMAT) + log(YRIN) + log(AGEN) + log(HGA1) + LOI + ASIA + BED + MATT + WCTP + CUTP + SHC, data = class.train, family = binomial)
+summary(logistic.a)
+
+#Improvement? IDK what i'm doing here lol
+logistic.b <- glm(PRI ~ log(IMAT) + log(YRIN) + log(AGEN) + LOI + ASIA + WCTP + CUTP + SHC, data = class.train, family = binomial)
+summary(logistic.b)
+
+# Use LOOCV (leave-one-out-cross-validation)
+# make complexity parameter smaller (cp), maybe 0.001, and try again, then prune
+# www.statmethods.net/advstats/cart.html
+# Try a random forest as well
+# Check dr. Sun's webpage for other tree plot methods
+# force tree to include sleep, pain, imat, age, ASIA
+# try using stumps for each variable to figure out how predictive they are individually
+# pri.cart_all_data <- rpart(PRI ~ ., data = class_data, method = "class", control = rpart.control(xval = nrow(class_data)))
+
+pri.no_test <- rpart(PRI ~ ., data = class_data, method = "class", control = rpart.control(xval = nrow(class_data)))
+pri.cart <- rpart(PRI ~ ., data = class.train, method = "class", control = rpart.control(xval = nrow(class.train)))
+pri.cart.binned <- rpart(PRI ~ ., data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.cart.forced <- rpart(PRI ~ SLEP + PAIN + IMAT + AGEN + YRIN + ASIA, data = class.train, method = "class", control = rpart.control(xval = nrow(class.train)))
+pri.cart.forced.binned <- rpart(PRI ~ SLEP + PAIN + IMAT + AGEN + YRIN + ASIA, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+
+tree_plot <- function(tree, title) {
+  g <- ggparty(as.party(tree)) + 
+  ggtitle(title) +
+  geom_edge() +
+  geom_edge_label() +
+  geom_node_label(line_list = list(aes(label = splitvar),
+                                   aes(label = paste0("N=", nodesize), 
+                                       size = 10)),
+                  line_gpar = list(list(size = 13), 
+                                   list(size = 10)), 
+                  ids = "inner") +
+  geom_node_plot(gglist = list(
+    geom_bar(aes(x = "", fill = PRI),
+             position = position_fill(), color = "black"),
+      theme_minimal(),
+      scale_fill_manual(values = c("gray50", "gray80"), guide = FALSE),
+      scale_y_continuous(breaks = c(0, 1)),
+    xlab(""), 
+    ylab("Probability"),
+    geom_text(aes(x = "", group = PRI,
+                  label = stat(count)),
+              stat = "count", position = position_fill(), vjust = 1.1)),
+    shared_axis_labels = TRUE)
+  return(g)
+}
+
+confusion_matrix <- function(object, newdata) {
+  preds <- as.data.frame(predict(object, newdata)) %>% mutate(YorN = case_when(
+  Y >= 0.5 ~ "Y",
+  TRUE ~ "N"
+)) %>% mutate(across(YorN, as.factor))
+  
+  caret::confusionMatrix(data = preds$YorN, reference = newdata$PRI, positive = "Y")
+}
+
+p.full <- tree_plot(pri.cart, 
+          title = "PRI Classification Tree (Full)") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.no_test <- tree_plot(pri.no_test, 
+          title = "PRI Classification Tree (Full) With All Data") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.binned <- tree_plot(pri.cart.binned,
+          title = "Binned PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.restrict <- tree_plot(pri.cart.forced,
+          title = "Reduced Variables PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+p.restrict.binned <- tree_plot(pri.cart.forced.binned,
+                               title = "Reduced Variables with Binning PRI Classification Tree") +
+  theme(panel.background = element_rect(fill = "white"))
+
+                               
+
+c.full.test <- confusion_matrix(pri.cart, class.test)
+c.full.train <- confusion_matrix(pri.cart, class.train)
+c.binned.test <- confusion_matrix(pri.cart.binned, binned.test)
+c.binned.train <- confusion_matrix(pri.cart.binned, binned.train)
+c.forced.test <- confusion_matrix(pri.cart.forced, class.test)
+c.forced.train <- confusion_matrix(pri.cart.forced, class.train)
+c.forced.binned.test <- confusion_matrix(pri.cart.forced.binned, binned.test)
+c.forced.binned.train <- confusion_matrix(pri.cart.forced.binned, binned.train)
+
+trees <- data.frame(matrix(nrow = 8, ncol = 5))
+colnames(trees) <- c("Tree", "Accuracy", "Sensitivity", "Specificity", "Precision")
+
+trees[1,] <- c("Full/test", c.full.test$overall[1], c.full.test$byClass[1], c.full.test$byClass[2], c.full.test$byClass[5])
+trees[2,] <- c("Full/train", c.full.train$overall[1], c.full.train$byClass[1], c.full.train$byClass[2], c.full.train$byClass[5])
+trees[3,] <- c("Binned/test", c.binned.test$overall[1], c.binned.test$byClass[1], c.binned.test$byClass[2], c.binned.test$byClass[5])
+trees[4,] <- c("Binned/train", c.binned.train$overall[1], c.binned.train$byClass[1], c.binned.train$byClass[2], c.binned.train$byClass[5])
+trees[5,] <- c("Restricted/test", c.forced.test$overall[1], c.forced.test$byClass[1], c.forced.test$byClass[2], c.forced.test$byClass[5])
+trees[6,] <- c("Restricted/train", c.forced.train$overall[1], c.forced.train$byClass[1], c.forced.train$byClass[2], c.forced.train$byClass[5])
+trees[7,] <- c("Restricted & Binned/test", c.forced.binned.test$overall[1], c.forced.binned.test$byClass[1], c.forced.binned.test$byClass[2], c.forced.binned.test$byClass[5])
+trees[8,] <- c("Restricted & Binned/train", c.forced.binned.train$overall[1], c.forced.binned.train$byClass[1], c.forced.binned.train$byClass[2], c.forced.binned.train$byClass[5])
+
+trees %>% mutate(across(Accuracy:Precision, as.numeric)) 
+
+trees <- rapply(object = trees, f = round, classes = "numeric", how = "replace", digits = 3) 
+
+
+
+tree_plot <- function(tree, title) {
+  g <- ggparty(as.party(tree)) + 
+  ggtitle(title) +
+  geom_edge() +
+  geom_edge_label() +
+  geom_node_label(line_list = list(aes(label = splitvar),
+                                   aes(label = paste0("N=", nodesize), 
+                                       size = 10)),
+                  line_gpar = list(list(size = 13), 
+                                   list(size = 10)), 
+                  ids = "inner") +
+  geom_node_plot(gglist = list(
+    geom_bar(aes(x = "", fill = PRI),
+             position = position_fill(), color = "black"),
+      theme_minimal(),
+      scale_fill_manual(values = c("gray50", "gray80"), guide = FALSE),
+      scale_y_continuous(breaks = c(0, 1)),
+    xlab(""), 
+    ylab("Probability"),
+    geom_text(aes(x = "", group = PRI,
+                  label = stat(count)),
+              stat = "count", position = position_fill(), vjust = 1.1)),
+    shared_axis_labels = TRUE)
+  return(g)
+}
+
+pri.stump.SLEP <- rpart(PRI ~ SLEP, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.stump.PAIN <- rpart(PRI ~ PAIN, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.stump.IMAT <- rpart(PRI ~ IMAT, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.stump.AGEN <- rpart(PRI ~ AGEN, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.stump.YRIN <- rpart(PRI ~ YRIN, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+pri.stump.ASIA <- rpart(PRI ~ ASIA, data = binned.train, method = "class", control = rpart.control(xval = nrow(binned.train)))
+
+# most interesting are IMAT, YRIN, ASIA
+p.stump.slep <- tree_plot(pri.stump.SLEP, "SLEP Stump") + theme(panel.background = element_rect(fill = "white"))
+p.stump.pain <- tree_plot(pri.stump.PAIN, "PAIN Stump") + theme(panel.background = element_rect(fill = "white"))
+p.stump.imat <- tree_plot(pri.stump.IMAT, "IMAT Stump") + theme(panel.background = element_rect(fill = "white"))
+p.stump.agen <- tree_plot(pri.stump.AGEN, "AGEN Stump") + theme(panel.background = element_rect(fill = "white"))
+p.stump.yrin <- tree_plot(pri.stump.YRIN, "YRIN Stump") + theme(panel.background = element_rect(fill = "white"))
+p.stump.asia <- tree_plot(pri.stump.ASIA, "ASIA Stump") + theme(panel.background = element_rect(fill = "white"))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
