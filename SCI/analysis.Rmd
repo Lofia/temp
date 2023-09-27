@@ -1,0 +1,375 @@
+---
+title: "SCI Analysis"
+author: "Zixiang Xu"
+output:
+  html_document:
+    keep_md: true
+    number_sections: no
+    theme:
+      version: 4
+      bootswatch: united
+    toc: no
+    toc_float: yes
+  html_notebook:
+    theme: united
+    toc: no
+    toc_float: yes
+  word_document:
+    toc: no
+  pdf_document:
+    toc: no
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 2000px;
+  margin-left: auto;
+  margin-right: auto;
+}</style>
+```
+```{=html}
+<style type="text/css">
+    #header {
+        text-align: center;
+    }
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = 'C:/Users/Zixiang Xu/Desktop/GMU/JY Sun/SCI')
+```
+
+```{r Pre-process, include=FALSE}
+d=read.csv("SRP Table_with variable abbreviation.csv",na.strings='')
+
+# remove columns with only one value - "0" (ignore NA)
+d2=Filter(function(x)length(unique(x[!is.na(x)]))>1,d)
+
+# # compute the percentage of NA's
+# dna=is.na(d)
+# a=sapply(1:345,function(i)return(sum(dna[,i])/24118))
+
+# remove rows with NA (5224/24118=21.7% removed)
+which_nas=apply(d2,1,function(X)any(is.na(X)))
+index=which(which_nas==FALSE)
+d3=d2[index,]
+
+# factorize columns
+for(i in c(2:7,11:13,15:244)) d3[,i]=as.factor(d3[,i])
+for(i in c('Height','Weight','BMI','DisabilityPercentage')) d3[i]=cut(d3[[i]],breaks=5)
+
+# setting
+sleep_disorder=c('circadian','CSA','RLS','insomnia','Hypersomnia','OSA','SleepApnea')
+demographics=colnames(d3)[2:5] #????????????
+```
+
+### Aim 1
+```{r eval=FALSE, fig.height=8, fig.width=20, include=FALSE}
+# prevalence of sleep disorder
+a=apply(d3[sleep_disorder],2,table)
+total_yes=sum((d3$Hypersomnia==1)+(d3$insomnia==1)+(d3$OSA==1)+(d3$RLS==1)+(d3$SleepApnea==1))
+a2=cbind(a,c(nrow(d3)-total_yes,total_yes))
+a3=rbind(a2,round(a2[2,]/a2[1,]*100,3))
+a4=rbind(a3,round(a3[2,]/a3[2,ncol(a3)],3))
+rownames(a4)=c('No','Yes','% of total population','% of sleep disorder patients')
+colnames(a4)[ncol(a4)]='Any sleep disorder'
+#library(kableExtra)
+#kable_classic(kbl(t(a4),caption = "Recreating booktabs style table"),html_font = "Cambria")
+cat('Prevalence of sleep disorder')
+t(a4)
+
+# describe aggregation
+library(ggplot2)
+library(ggpubr)
+cat('Relationships between sleep disorders and demographics\n')
+cat('In each of the side by side plot, the left one is based on number of countings, the right one adjusts each bar to 100% height, so that the right one can show clear proportional result. Except for "race, the right one is adjusted to total counting of each race in the whole population (not only those having sleep disorder). In this case, obvioulsly, each bar will not sum to 100%.')
+for(j in demographics){
+  df=data.frame('sleep_disorder_type'=rep(sleep_disorder,each=length(levels(d3[[j]]))),
+                category=rep(levels(d3[[j]]),length(sleep_disorder)),
+                'count'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))),
+                'percent'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))))
+  for(i in 1:length(sleep_disorder)){
+    count=ftable(d3[c(sleep_disorder[i],j)],col.vars=1)[,2]
+    percent=count/sum(count)
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),3]=count
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),4]=percent
+  }
+  if(j=='race') df$percent=df$count/as.vector(table(d3['race']))
+  p1=ggplot(df,aes(x=sleep_disorder_type,y=count,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  p2=ggplot(df,aes(x=sleep_disorder_type,y=percent,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  print(ggarrange(p1,p2,labels=rep(j,2),ncol=2))
+  ggsave(paste(j,1,'.png',sep=''),p1,path='./ggplots/')
+  ggsave(paste(j,2,'.png',sep=''),p2,path='./ggplots/')
+}
+#library(cowplot)
+#cowplot::plot_grid(plotlist = plot_lst,  nrow = 2, ncol = 2)
+#library(gridExtra)
+#marrangeGrob(plot_lst, nrow = 2, ncol = 2)
+#plot_lst[[1]];plot_lst[[2]]
+# library(ggpubr)
+# for(i in 1:length(plot_lst)) ggarrange(plot_lst[[i]],plot_lst_adj[[i]],labels=demographics,ncol=2)
+
+# sleep_disorder=c('circadian','COPD','CSA','RLS','narcolepsy','insomnia','Hypersomnia',
+#                  'OSA','PMR','OHS','SleepApnea','SleepHypoventilation','RBD') #PND??
+# turn continuous variable into categorical (height, weight ...)
+# for(i in c('Height','Weight','BMI','DisabilityPercentage')) d3[i]=cut(d3[[i]],breaks=5)
+# 
+# demographics=colnames(d3)[2:14]
+# M=matrix(nrow=length(sleep_disorder),ncol=length(demographics))
+# rownames(M)=sleep_disorder;colnames(M)=demographics
+# M2=M
+# for(i in sleep_disorder){
+#   for(j in demographics){
+#     contable=ftable(d3[c(i,j)],col.vars=1)
+#     p=chisq.test(contable,simulate.p.value=TRUE)$p.value
+#     M[i,j]=round(p,3)
+#     M2[i,j]=ifelse(p<0.05,'non-ind','ind')
+#   }
+# }
+# M
+# M2
+
+comorbidity=c('COPD','OHS') #??
+plot_lst=vector("list",length=length(comorbidity))
+cat('Relationships between sleep disorders and comorbidities')
+for(j in comorbidity){
+  df=data.frame('sleep_disorder_type'=rep(sleep_disorder,each=length(levels(d3[[j]]))),
+                category=rep(levels(d3[[j]]),length(sleep_disorder)),
+                'count'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))),
+                'percent'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))))
+  for(i in 1:length(sleep_disorder)){
+    count=ftable(d3[c(sleep_disorder[i],j)],col.vars=1)[,2]
+    percent=count/sum(count)
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),3]=count
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),4]=percent
+  }
+  p1=ggplot(df,aes(x=sleep_disorder_type,y=count,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  p2=ggplot(df,aes(x=sleep_disorder_type,y=percent,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  print(ggarrange(p1,p2,labels=rep(j,2),ncol=2))
+  ggsave(paste(j,1,'.png',sep=''),p1,path='./ggplots/')
+  ggsave(paste(j,2,'.png',sep=''),p2,path='./ggplots/')
+}
+```
+
+### Aim 2
+
+```{r eval=FALSE, fig.height=8, fig.width=20, include=FALSE}
+cat('Relationships between sleep disorders and cardiometabolic conditions')
+cardiometabolic=c('AF','HF','HTN',
+                  'HLD','Hypothyroidism','liverDz')
+for(j in cardiometabolic){
+  df=data.frame('sleep_disorder_type'=rep(sleep_disorder,each=length(levels(d3[[j]]))),
+                category=rep(levels(d3[[j]]),length(sleep_disorder)),
+                'count'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))),
+                'percent'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))))
+  for(i in 1:length(sleep_disorder)){
+    count=ftable(d3[c(sleep_disorder[i],j)],col.vars=1)[,2]
+    percent=count/sum(count)
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),3]=count
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),4]=percent
+  }
+  p1=ggplot(df,aes(x=sleep_disorder_type,y=count,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  p2=ggplot(df,aes(x=sleep_disorder_type,y=percent,fill=category,colour=category))+
+    geom_bar(stat="identity")
+  print(ggarrange(p1,p2,labels=rep(j,2),ncol=2))
+  ggsave(paste(j,1,'.png',sep=''),p1,path='./ggplots/')
+  ggsave(paste(j,2,'.png',sep=''),p2,path='./ggplots/')
+}
+
+cat('Relationships between sleep disorders and cardiometabolic conditions in a reversed style')
+for(j in cardiometabolic){
+  df=data.frame('sleep_disorder_type'=rep(sleep_disorder,each=length(levels(d3[[j]]))),
+                category=rep(levels(d3[[j]]),length(sleep_disorder)),
+                'count'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))),
+                'percent'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))))
+  sum_record=rep(0,length(levels(d3[[j]])))
+  for(i in 1:length(sleep_disorder)){
+    count=ftable(d3[c(sleep_disorder[i],j)],col.vars=1)[,2]
+    sum_record=count+sum_record
+    # percent=count/sum(count)
+    df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),3]=count
+    # df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),4]=percent
+  }
+  df$percent=df$count/rep(sum_record,length(sleep_disorder))
+  p1=ggplot(df,aes(x=category,y=count,fill=sleep_disorder_type,colour=sleep_disorder_type))+
+    geom_bar(stat="identity")
+  p2=ggplot(df,aes(x=category,y=percent,fill=sleep_disorder_type,colour=sleep_disorder_type))+
+    geom_bar(stat="identity")
+  print(ggarrange(p1,p2,labels=rep(j,2),ncol=2))
+  ggsave(paste(j,1,'_reversed.png',sep=''),p1,path='./ggplots/')
+  ggsave(paste(j,2,'_reversed.png',sep=''),p2,path='./ggplots/')
+}
+
+# plot_lst=vector("list",length=length(cardiometabolic))
+# index=1
+# for(j in cardiometabolic){
+#   df=data.frame('sleep_disorder_type'=rep(sleep_disorder,each=length(levels(d3[[j]]))),category=rep(levels(d3[[j]]),length(sleep_disorder)),'count'=rep(Inf,length(sleep_disorder)*length(levels(d3[[j]]))))
+#   for(i in 1:length(sleep_disorder)){
+#     count=ftable(d3[c(sleep_disorder[i],j)],col.vars=1)[,2]
+#     df[(c(length(levels(d3[[j]]))*(i-1)+1):(length(levels(d3[[j]]))*i)),3]=count
+#   }
+#   plot_lst[[index]]=ggplot(df,aes(x=category,y=count,fill=sleep_disorder_type,colour=sleep_disorder_type))+
+#     geom_bar(stat="identity")
+#   index=index+1
+# }
+# ggarrange(plotlist=plot_lst,labels=cardiometabolic,ncol=3,nrow=2)
+```
+
+#### Clustering by Similarity Coefficients
+![](screenshot.png)
+![](white.png)
+![](dictionary.png)
+```{r echo=FALSE, fig.height=6, fig.width=10}
+library(ggplot2)
+comorbidity=c('COPD','OHS') #??
+cardiometabolic=c('AF','HF','HTN',
+                  'HLD','Hypothyroidism','liverDz')
+
+# d4=d3
+# for(i in 1:length(d3)){
+#   d4[,i]=as.vector(scale(as.numeric(d4[,i])))
+# }
+# corrplot::corrplot(cor(d4[c(sleep_disorder,demographics)]))
+# corrplot::corrplot(cor(d4[c(sleep_disorder,cardiometabolic)]))
+# corrplot::corrplot(cor(d4[c(sleep_disorder,comorbidity)]))
+# #library(GGally)
+# #ggpairs(d4[c(demographics,sleep_disorder)])
+
+library(lattice)
+heat=function(a=sleep_disorder,b){
+  M=matrix(nrow=length(a),ncol=length(b))
+  rownames(M)=a;colnames(M)=b
+  for(i in 1:length(a)){
+    for(j in 1:length(b)){
+      tab=table(d3[c(a[i],b[j])])
+      M[i,j]=(tab[1,1]+tab[2,2])/sum(tab)
+    }
+  }
+  levelplot(M,xlab='',ylab='',main='(a+d)/p: co-existence',aspect="fill")#,col.regions = rainbow(1))
+}
+
+
+heat2=function(a=sleep_disorder,b){
+  M=matrix(nrow=length(a),ncol=length(b))
+  rownames(M)=a;colnames(M)=b
+  for(i in 1:length(a)){
+    for(j in 1:length(b)){
+      tab=table(d3[c(a[i],b[j])])
+      M[i,j]=tab[1,1]/(sum(tab)-tab[2,2])
+    }
+  }
+  levelplot(M,xlab='',ylab='',main='a/(a+b+c): both exist | exist',aspect="fill")#,col.regions = rainbow(1))
+}
+
+heat3=function(a=sleep_disorder,b){
+  M=matrix(nrow=length(a),ncol=length(b))
+  rownames(M)=a;colnames(M)=b
+  for(i in 1:length(a)){
+    for(j in 1:length(b)){
+      tab=table(d3[c(a[i],b[j])])
+      M[i,j]=log(tab[1,1]/(tab[1,2]+tab[2,1]))
+    }
+  }
+  levelplot(M,xlab='',ylab='',main='log(a/(b+c)): log odds ratio',aspect="fill")#,col.regions = rainbow(1))
+}
+
+demographics=colnames(d3)[5:6] #!!!!!!!!!!!!!!!
+# heat(b=demographics)
+# heat2(b=demographics)
+# heat3(b=demographics)
+# 
+# heat(b=comorbidity)
+# heat2(b=comorbidity)
+# heat3(b=comorbidity)
+# 
+# heat(b=cardiometabolic)
+# heat2(b=cardiometabolic)
+# heat3(b=cardiometabolic)
+heat(b=c(demographics,cardiometabolic,comorbidity))
+heat2(b=c(demographics,cardiometabolic,comorbidity))
+heat3(b=c(demographics,cardiometabolic,comorbidity))
+```
+
+#### Clustering by Multiple Correspondence Analysis
+
+<!-- |  | Item $k$ |  | Totals | -->
+
+<!-- | :---: | :---: | :---: | :---: | -->
+
+<!-- |  | 1 | 0 | $a+b$ | -->
+
+<!-- | Item $i$ | $a$ | $b$ | $c+d$ | -->
+
+<!-- |  | $c$ | $d$ | $p=a+b+c+d$ | -->
+
+<!-- | Coefficient | Rationale | -->
+
+<!-- | :---: | :---: | -->
+
+<!-- | 1. $\frac{a+d}{p}$ | Equal weights for $1-1$ matches and $0-0$ matches. | -->
+
+<!-- | 2. $\frac{a}{a+b+c}$ | $\begin{array}{l}\text { No } 0-0 \text { matches in numerator or denominator. } \\ \text { (The } 0-0 \text { matches are treated as irrelevant.) }\end{array}$ | -->
+
+<!-- | 3. $\frac{a}{b+c}$ | Ratio of matches to mismatches with 0-0 matches excluded. | -->
+
+```{r echo=FALSE, fig.height=20, fig.width=20}
+# cc=function(x, printout=FALSE){
+#  rsum=apply(x,1,sum)
+#  csum=apply(x,2,sum)
+#  n=sum(x)
+#  rsum=matrix(rsum,ncol=1)
+#  csum=matrix(csum,ncol=1)
+#  ee=rsum %*% t(csum)/n
+#  cc=(x-ee)/sqrt(ee)
+#  d=svd(cc)
+#  I=dim(x)[1]
+#  J=dim(x)[2]
+#  xs=sum((d$d^2))
+#  pv=1-pchisq(xs,(I-1)*(J-1))
+#  y=rbind(d$u,d$v)
+#  plot(y[, 1], y[, 2], type = "n", xlab = "Correspondence Coord 1", ylab = "Correspondence Coord 2",xlim=c(-1,1),ylim=c(-1,1))
+#  text(y[,1],y[,2],c(dimnames(x)[[1]],dimnames(x)[[2]]),col=c(rep(2,I),rep(3,J)),cex=1)
+#  points(0,0)
+#  intertia=sum((d$d[1:2]^2))/xs
+#  if(printout) list(pvalue=pv,xsq=xs,inertia=intertia,rsum=rsum,csum=csum)
+# }
+# 
+# 
+# M=matrix(nrow=length(sleep_disorder),ncol=length(cardiometabolic))
+# rownames(M)=sleep_disorder
+# colnames(M)=cardiometabolic
+# for(i in 1:nrow(M)){
+#   for(j in 1:ncol(M)){
+#     M[i,j]=table(d3[c(sleep_disorder[i],cardiometabolic[j])])['1','1']
+#   }
+# }
+# cat('sleep disorders - cardiometabolic')
+# cc(M)
+# 
+# M=matrix(nrow=length(sleep_disorder),ncol=length(comorbidity))
+# rownames(M)=sleep_disorder
+# colnames(M)=comorbidity
+# for(i in 1:nrow(M)){
+#   for(j in 1:ncol(M)){
+#     M[i,j]=table(d3[c(sleep_disorder[i],comorbidity[j])])['1','1']
+#   }
+# }
+# cat('sleep disorders - comorbidity')
+# cc(M)
+
+
+library("FactoMineR")
+library("factoextra")
+fviz_mca_var(MCA(X=d3[c(sleep_disorder,demographics,cardiometabolic,comorbidity)],graph=FALSE),col.var=c(
+  rep('sleep_disorder',2*length(sleep_disorder)),
+  rep('demographics',2*length(demographics)),
+  rep('cardiometabolic',2*length(cardiometabolic)),
+  rep('comorbidity',2*length(comorbidity))
+  ),repel=TRUE)
+```
